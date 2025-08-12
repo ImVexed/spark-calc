@@ -41,6 +41,49 @@ function sweptCircleHitT(px, py, dx, dy, cx, cy, R) {
   return t;
 }
 
+// Closest points between two segments P0->P1 and Q0->Q1
+// Returns {sc, tc, px, py, qx, qy, dist}
+function closestPointsBetweenSegments(p0x, p0y, p1x, p1y, q0x, q0y, q1x, q1y) {
+  const ux = p1x - p0x, uy = p1y - p0y;
+  const vx = q1x - q0x, vy = q1y - q0y;
+  const wx = p0x - q0x, wy = p0y - q0y;
+  const a = ux * ux + uy * uy;      // |u|^2
+  const b = ux * vx + uy * vy;      // u·v
+  const c = vx * vx + vy * vy;      // |v|^2
+  const d = ux * wx + uy * wy;      // u·w
+  const e = vx * wx + vy * wy;      // v·w
+  const D = a * c - b * b;
+  let sc, sN, sD = D;
+  let tc, tN, tD = D;
+
+  const EPS = 1e-9;
+  if (D < EPS) {
+    // parallel
+    sN = 0.0; sD = 1.0; tN = e; tD = c;
+  } else {
+    sN = (b * e - c * d);
+    tN = (a * e - b * d);
+    if (sN < 0) { sN = 0; tN = e; tD = c; }
+    else if (sN > sD) { sN = sD; tN = e + b; tD = c; }
+  }
+
+  if (tN < 0) {
+    tN = 0;
+    if (-d < 0) sN = 0; else if (-d > a) sN = sD; else { sN = -d; sD = a; }
+  } else if (tN > tD) {
+    tN = tD;
+    if ((-d + b) < 0) sN = 0; else if ((-d + b) > a) sN = sD; else { sN = (-d + b); sD = a; }
+  }
+
+  sc = Math.abs(sD) < EPS ? 0 : sN / sD;
+  tc = Math.abs(tD) < EPS ? 0 : tN / tD;
+
+  const px = p0x + sc * ux, py = p0y + sc * uy;
+  const qx = q0x + tc * vx, qy = q0y + tc * vy;
+  const dx = px - qx, dy = py - qy;
+  return { sc, tc, px, py, qx, qy, dist: Math.hypot(dx, dy) };
+}
+
 /** PoE Spark target cooldown per-cast per-enemy (seconds) */
 const PER_CAST_TARGET_COOLDOWN = 0.66;
 
@@ -368,6 +411,7 @@ class Simulation {
     this.lastTime = performance.now();
     this.accum = 0;
     this.fixedDt = 1 / 120; // high fidelity physics
+    this.maxTerrainStepPx = 2.0; // CCD safety step for terrain (pixels)
 
     // Entities (positions in pixels, radii scaled from world units)
     const cx = this.width / 2; const cy = this.height / 2;
@@ -430,8 +474,8 @@ class Simulation {
       castInterval: castSpeed > 0 ? 1 / castSpeed : Infinity,
       duration: getNum('duration'),
       castShape: getSel('castShape'),
-      casterFacingDeg: getNum('casterFacingDeg'),
-      coneAngleDeg: Number(document.getElementById('coneAngle')?.value || 90),
+      casterFacingDeg: Number(document.getElementById('casterFacingDeg').value),
+      coneAngleDeg: 90,
       pierceCount: getNum('pierceCount'),
       forkTimes: getNum('forkTimes'),
       chainCount: getNum('chainCount'),
@@ -449,7 +493,7 @@ class Simulation {
 
   installUI() {
     const ids = [
-      'arenaType','avgHit','projSpeed','projectileCount','castSpeed','duration','castShape','casterFacingDeg','coneAngle','pierceCount','forkTimes','chainCount','splitCount','forkChance','bossRadius'
+      'arenaType','avgHit','projSpeed','projectileCount','castSpeed','duration','castShape','casterFacingDeg','pierceCount','forkTimes','chainCount','splitCount','forkChance','bossRadius'
     ];
     for (const id of ids) {
       document.getElementById(id).addEventListener('input', () => {
@@ -651,51 +695,73 @@ class Simulation {
       }
     }
 
-    // Update projectiles
+    // Update projectiles with sub-stepped CCD (prevents tunneling at high speeds)
     const survivors = [];
     for (const proj of this.projectiles) {
       if (proj.isExpired(now)) continue;
       proj.think(dt);
 
-      // Continuous collision detection against boss within this frame
-      let remaining = dt;
+      const speed = Math.hypot(proj.vx, proj.vy);
+      const totalDist = speed * dt;
+      const steps = Math.max(1, Math.ceil(totalDist / this.maxTerrainStepPx));
+      const subdt = dt / steps;
+
       let removed = false;
-      // Limit to handling one enemy collision per frame to avoid deep loops
-      for (let iter = 0; iter < 1 && remaining > 0 && !removed; iter++) {
-        const dx = proj.vx * remaining;
-        const dy = proj.vy * remaining;
+      for (let s = 0; s < steps && !removed; s++) {
+        // CCD vs boss within substep
+        const dx = proj.vx * subdt;
+        const dy = proj.vy * subdt;
         const R = proj.radius + this.boss.r;
         const tHit = sweptCircleHitT(proj.x, proj.y, dx, dy, this.boss.x, this.boss.y, R);
         if (tHit !== null) {
-          // advance to collision point
           proj.x += dx * tHit;
           proj.y += dy * tHit;
-          const collisionTimeMs = now + (dt - remaining + remaining * tHit) * 1000;
+          const collisionTimeMs = now + (s * subdt + subdt * tHit) * 1000;
           const enemyRes = this.handleProjectileEnemyCollision(proj, collisionTimeMs);
           if (enemyRes === 'remove') { removed = true; break; }
-          // If kept (e.g., pierce), advance remaining time after hit
-          remaining = remaining * (1 - tHit);
-          // Continue with remaining time in one go
-          proj.move(remaining);
-          remaining = 0;
+          const remainFrac = 1 - tHit;
+          if (remainFrac > 0) {
+            proj.move(subdt * remainFrac);
+          }
         } else {
-          // No collision during this segment
-          proj.move(remaining);
-          remaining = 0;
+          proj.move(subdt);
+        }
+
+        // Terrain collision (reflect). Use swept test against T-junction segments if applicable
+        if (this.arena instanceof TJunctionArena) {
+          // moving circle vs line segments (swept): approximate by segment-to-segment distance
+          const nx = proj.vx * subdt; const ny = proj.vy * subdt;
+          const p0x = proj.x - nx, p0y = proj.y - ny;
+          const p1x = proj.x, p1y = proj.y;
+          for (const seg of this.arena.segments) {
+            const cp = closestPointsBetweenSegments(p0x, p0y, p1x, p1y, seg.x1, seg.y1, seg.x2, seg.y2);
+            if (cp.dist < proj.radius) {
+              // back up slightly and reflect
+              const hitT = cp.sc; // along projectile path
+              // place at contact point minus small epsilon outward
+              const px = p0x + (p1x - p0x) * hitT;
+              const py = p0y + (p1y - p0y) * hitT;
+              // normal = from closest point on wall to projectile path point
+              const wx = cp.px - cp.qx; const wy = cp.py - cp.qy;
+              const len = Math.hypot(wx, wy) || 1;
+              const nxn = wx / len; const nyn = wy / len;
+              proj.x = cp.qx + nxn * proj.radius;
+              proj.y = cp.qy + nyn * proj.radius;
+              proj.reflect(nxn, nyn);
+              break;
+            }
+          }
+        } else {
+          const hit = this.arena.collideCircle(proj.x, proj.y, proj.radius);
+          if (hit.hit) {
+            proj.x = hit.x; proj.y = hit.y;
+            if (hit.reflect) proj.reflect(hit.nx, hit.ny);
+            const res = this.attemptBehavioursOnTerrainCollision(proj);
+            if (res === 'remove') { removed = true; break; }
+          }
         }
       }
       if (removed) continue;
-
-      // Terrain collisions (enemy-only behaviors; terrain just reflects)
-      const hit = this.arena.collideCircle(proj.x, proj.y, proj.radius);
-      if (hit.hit) {
-        proj.x = hit.x; proj.y = hit.y;
-        if (hit.reflect) {
-          proj.reflect(hit.nx, hit.ny);
-        }
-        const res = this.attemptBehavioursOnTerrainCollision(proj);
-        if (res === 'remove') continue;
-      }
 
       survivors.push(proj);
     }
@@ -713,6 +779,28 @@ class Simulation {
 
     // Arena
     this.arena.draw(ctx);
+
+    // If cone casting, draw facing and 90° cone lines from caster
+    if (this.config.castShape === 'cone') {
+      const facing = (this.config.casterFacingDeg || 0) * DEG_TO_RAD;
+      const half = (90 * DEG_TO_RAD) / 2;
+      const r = ARENA_RADIUS_UNITS * this.scale * 0.3; // visual length (cut by ~66%)
+      const angles = [facing - half, facing, facing + half];
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,209,102,0.75)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      for (let i = 0; i < angles.length; i++) {
+        const a = angles[i];
+        const x2 = this.caster.x + Math.cos(a) * r;
+        const y2 = this.caster.y + Math.sin(a) * r;
+        ctx.moveTo(this.caster.x, this.caster.y);
+        ctx.lineTo(x2, y2);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Leash radius removed
 
