@@ -1,5 +1,5 @@
 /*
-  Spark simulator (client-side only)
+  Spark simulator
   - Canvas-based 2D environment
   - Configurable projectile speed, duration, pierce/fork/chain/split
   - Circular or cone emission

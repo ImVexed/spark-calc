@@ -1,7 +1,7 @@
 Spark Simulator (Path of Exile – Spark DPS Sandbox)
 ===================================================
 
-Client-side, zero-backend web app to visualize and approximate Path of Exile's Spark projectile behavior and DPS. Runs entirely in the browser using a single HTML page, CSS, and vanilla JavaScript.
+Web app to visualize and approximate Path of Exile's Spark projectile behavior and DPS. Runs entirely in the browser using a single HTML page, CSS, and vanilla JavaScript.
 
 
 Current assumptions I couldn't find definitive answers to:
