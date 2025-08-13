@@ -3,6 +3,16 @@ Spark Simulator (Path of Exile – Spark DPS Sandbox)
 
 Client-side, zero-backend web app to visualize and approximate Path of Exile's Spark projectile behavior and DPS. Runs entirely in the browser using a single HTML page, CSS, and vanilla JavaScript.
 
+
+Current assumptions I couldn't find definitive answers to:
+-----------
+- How many units/s does Spark move at base? Gem states `Projectile Speed: 420`, no idea what units that is in. 82 unit/s seems to match in game roughly.
+- Spark cone angle is 90 degrees. 
+- Maven/Most bosses are 3 units.
+- Maven arena is 160 units.
+- Sparks are 1.5 units.
+- Spark jitter left/right while in flight. I tried to extract coordinates by masking and tracking a video, likely not super accurate but looks similar to in game. 
+
 Quick start
 -----------
 
