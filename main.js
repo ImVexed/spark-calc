@@ -293,8 +293,8 @@ const ARENA_RADIUS_UNITS = 160; // circle arena radius in world units
 const BOSS_RADIUS_UNITS = 3;
 const CASTER_RADIUS_UNITS = 5;
 const PROJ_RADIUS_UNITS = 1.5;
-const BASE_PROJ_SPEED_UNITS = 70;
-const WANDER_INTENSITY = 0.50;
+const BASE_PROJ_SPEED_UNITS = 80;
+const WANDER_INTENSITY = 0.66;
 
 /**
  * Event-driven wander to mimic Spark-like motion:
