@@ -65,8 +65,11 @@ function parseURLParams() {
     sp: num('sp'), // splitCount
     er: num('er'), // bossRadius
     ts: num('ts'), // chart window (seconds)
-    cx: num('cx'), cy: num('cy'), // caster pos (0..1)
-    bx: num('bx'), by: num('by'), // boss pos (0..1)
+    // Positions: support both canvas-normalized (0..1) and world-normalized (relative to arena radius)
+    cx: num('cx'), cy: num('cy'), // legacy canvas-normalized positions
+    bx: num('bx'), by: num('by'),
+    cxu: num('cxu'), cyu: num('cyu'), // world-normalized positions (relative to ARENA_RADIUS_UNITS)
+    bxu: num('bxu'), byu: num('byu'),
   };
   return out;
 }
@@ -90,8 +93,12 @@ function applyParamsToDOM(params) {
   setIf('bossRadius', params.er);
   if (params.ts !== undefined && !Number.isNaN(params.ts)) document.getElementById('timeScale').value = String(params.ts);
   const pos = {};
-  if (params.cx !== undefined && params.cy !== undefined) pos.caster = { x: clamp(params.cx, 0, 1), y: clamp(params.cy, 0, 1) };
-  if (params.bx !== undefined && params.by !== undefined) pos.boss = { x: clamp(params.bx, 0, 1), y: clamp(params.by, 0, 1) };
+  // Prefer world-normalized positions if provided
+  if (params.cxu !== undefined && params.cyu !== undefined) pos.casterWorld = { x: params.cxu, y: params.cyu };
+  if (params.bxu !== undefined && params.byu !== undefined) pos.bossWorld = { x: params.bxu, y: params.byu };
+  // Fallback to legacy canvas-normalized
+  if (!pos.casterWorld && params.cx !== undefined && params.cy !== undefined) pos.caster = { x: clamp(params.cx, 0, 1), y: clamp(params.cy, 0, 1) };
+  if (!pos.bossWorld && params.bx !== undefined && params.by !== undefined) pos.boss = { x: clamp(params.bx, 0, 1), y: clamp(params.by, 0, 1) };
   return pos;
 }
 
@@ -113,14 +120,21 @@ function writeURLParams(state) {
   set('sp', state.sp);
   set('er', state.er);
   set('ts', state.ts);
-  const fmt = (v) => {
-    const s = Number(v).toFixed(3);
-    return s.replace(/\.0+$/, '').replace(/\.(\d*?)0+$/, '.$1');
+  const fmtN = (n) => (v) => {
+    const s = Number(v).toFixed(n);
+    return s.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
   };
-  if (state.cx !== undefined) set('cx', fmt(state.cx));
-  if (state.cy !== undefined) set('cy', fmt(state.cy));
-  if (state.bx !== undefined) set('bx', fmt(state.bx));
-  if (state.by !== undefined) set('by', fmt(state.by));
+  const fmt3 = fmtN(3);
+  const fmt5 = fmtN(5);
+  if (state.cx !== undefined) set('cx', fmt3(state.cx));
+  if (state.cy !== undefined) set('cy', fmt3(state.cy));
+  if (state.bx !== undefined) set('bx', fmt3(state.bx));
+  if (state.by !== undefined) set('by', fmt3(state.by));
+  // Also persist world-normalized positions for cross-resolution stability (higher precision)
+  if (state.cxu !== undefined) set('cxu', fmt5(state.cxu));
+  if (state.cyu !== undefined) set('cyu', fmt5(state.cyu));
+  if (state.bxu !== undefined) set('bxu', fmt5(state.bxu));
+  if (state.byu !== undefined) set('byu', fmt5(state.byu));
   const url = window.location.pathname + '?' + p.toString();
   window.history.replaceState(null, '', url);
 }
@@ -467,23 +481,20 @@ class TJunctionArena extends Arena {
     const barWidthU = 320;
     const barHeightU = 80;
 
-    const sW = stemWidthU * scale;      // inner stem width
-    const sH = stemHeightU * scale;     // stem length
-    const bW = barWidthU * scale;       // inner bar width
-    const bH = barHeightU * scale;      // inner bar height
+    // Fit the full T height within the baseline circle footprint (320u) so it's centered and not clipped
+    const targetHUnits = ARENA_RADIUS_UNITS * 2; // 320u
+    const tHeightUnits = stemHeightU + barHeightU; // 340u by default
+    const fitFactor = Math.min(1, targetHUnits / tHeightUnits);
+    const sW = stemWidthU * scale * fitFactor;      // inner stem width
+    const sH = stemHeightU * scale * fitFactor;     // stem length
+    const bW = barWidthU * scale * fitFactor;       // inner bar width
+    const bH = barHeightU * scale * fitFactor;      // inner bar height
 
     // Connection Y (where stem meets bar, at center of bar vertically)
     const connectY = cy - sH / 2;
-    let barCenterY = connectY; // center of bar along Y
-    let barTopY = barCenterY - bH / 2;
-    let barBotY = barCenterY + bH / 2;
-
-    // Ensure some top margin from screen edge
-    const topMargin = 20; // px
-    if (barTopY < topMargin) {
-      const dy = topMargin - barTopY;
-      barTopY += dy; barBotY += dy; barCenterY += dy;
-    }
+    const barCenterY = connectY; // center of bar along Y
+    const barTopY = barCenterY - bH / 2;
+    const barBotY = barCenterY + bH / 2;
 
     // Stem vertical walls terminate at bar bottom to leave opening
     const stemLeftX = cx - sW / 2;
@@ -647,11 +658,49 @@ class Simulation {
     // Apply initial enemy radius from config
     this.boss.r = clamp(this.config.bossRadius || BOSS_RADIUS_UNITS, 0.1, 999) * this.scale;
 
-    // Apply initial enemy radius from config
-    this.boss.r = clamp(this.config.bossRadius || BOSS_RADIUS_UNITS, 0.1, 999) * this.scale;
-    // Apply positions from URL (normalized 0..1)
-    if (__pos.caster) { this.caster.x = __pos.caster.x * this.width; this.caster.y = __pos.caster.y * this.height; }
-    if (__pos.boss) { this.boss.x = __pos.boss.x * this.width; this.boss.y = __pos.boss.y * this.height; }
+    // Apply positions from URL
+    const centerX = this.width / 2; const centerY = this.height / 2;
+    if (__pos.casterWorld) {
+      this.caster.x = centerX + (__pos.casterWorld.x * ARENA_RADIUS_UNITS) * this.scale;
+      this.caster.y = centerY + (__pos.casterWorld.y * ARENA_RADIUS_UNITS) * this.scale;
+    } else if (__pos.caster) {
+      this.caster.x = __pos.caster.x * this.width;
+      this.caster.y = __pos.caster.y * this.height;
+    }
+    if (__pos.bossWorld) {
+      this.boss.x = centerX + (__pos.bossWorld.x * ARENA_RADIUS_UNITS) * this.scale;
+      this.boss.y = centerY + (__pos.bossWorld.y * ARENA_RADIUS_UNITS) * this.scale;
+    } else if (__pos.boss) {
+      this.boss.x = __pos.boss.x * this.width;
+      this.boss.y = __pos.boss.y * this.height;
+    }
+
+    // Ensure we always populate world-normalized positions in URL for sharing (prefer world coords only)
+    const worldCasterX0 = (this.caster.x - centerX) / (this.scale * ARENA_RADIUS_UNITS);
+    const worldCasterY0 = (this.caster.y - centerY) / (this.scale * ARENA_RADIUS_UNITS);
+    const worldBossX0 = (this.boss.x - centerX) / (this.scale * ARENA_RADIUS_UNITS);
+    const worldBossY0 = (this.boss.y - centerY) / (this.scale * ARENA_RADIUS_UNITS);
+    writeURLParams({
+      a: this.config.arenaType,
+      ah: this.config.avgHit,
+      ps: this.config.projSpeedMod,
+      d: this.config.duration,
+      pc: this.config.projectileCount,
+      cs: this.config.castSpeed,
+      shape: this.config.castShape,
+      face: this.config.casterFacingDeg,
+      pr: this.config.pierceCount,
+      fk: this.config.forkTimes,
+      fc: this.config.forkChance,
+      ch: this.config.chainCount,
+      sp: this.config.splitCount,
+      er: this.config.bossRadius,
+      ts: this.metrics.windowSec,
+      cxu: worldCasterX0,
+      cyu: worldCasterY0,
+      bxu: worldBossX0,
+      byu: worldBossY0,
+    });
 
     // Hit tracking
     this.hitsTotal = 0;
@@ -721,6 +770,11 @@ class Simulation {
         this.boss.r = clamp(this.config.bossRadius, 0.1, 999) * this.scale;
 
         // write URL params on any config change
+        const centerX = this.width / 2, centerY = this.height / 2;
+        const worldCasterX = (this.caster.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
+        const worldCasterY = (this.caster.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
+        const worldBossX = (this.boss.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
+        const worldBossY = (this.boss.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
         writeURLParams({
           a: this.config.arenaType,
           ah: this.config.avgHit,
@@ -737,10 +791,10 @@ class Simulation {
           sp: this.config.splitCount,
           er: this.config.bossRadius,
           ts: this.metrics.windowSec,
-          cx: this.caster.x / this.width,
-          cy: this.caster.y / this.height,
-          bx: this.boss.x / this.width,
-          by: this.boss.y / this.height,
+          cxu: worldCasterX,
+          cyu: worldCasterY,
+          bxu: worldBossX,
+          byu: worldBossY,
         });
       });
     }
@@ -793,6 +847,11 @@ class Simulation {
       if (this.dragging === 'caster') { this.caster.x = p.x; this.caster.y = p.y; }
       if (this.dragging === 'boss') { this.boss.x = p.x; this.boss.y = p.y; }
       // update URL for positions
+      const centerX = this.width / 2, centerY = this.height / 2;
+      const worldCasterX = (this.caster.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
+      const worldCasterY = (this.caster.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
+      const worldBossX = (this.boss.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
+      const worldBossY = (this.boss.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
       writeURLParams({
         a: this.config.arenaType,
         ah: this.config.avgHit,
@@ -809,10 +868,10 @@ class Simulation {
         sp: this.config.splitCount,
         er: this.config.bossRadius,
         ts: this.metrics.windowSec,
-        cx: this.caster.x / this.width,
-        cy: this.caster.y / this.height,
-        bx: this.boss.x / this.width,
-        by: this.boss.y / this.height,
+        cxu: worldCasterX,
+        cyu: worldCasterY,
+        bxu: worldBossX,
+        byu: worldBossY,
       });
     });
     window.addEventListener('mouseup', () => {
@@ -1217,18 +1276,39 @@ window.addEventListener('DOMContentLoaded', () => {
       const ratio = sim.scale / prev.scale;
       // propagate scale globally for projectile radius construction
       window.__currentScale = sim.scale;
-      // Rescale entities
-      sim.caster.x = prev.caster.x * ratio; sim.caster.y = prev.caster.y * ratio;
-      sim.boss.x = prev.boss.x * ratio; sim.boss.y = prev.boss.y * ratio;
-      // Carry-over projectiles with rescale
-      sim.projectiles = prev.projectiles.map(p => {
-        p.x *= ratio; p.y *= ratio;
-        p.vx *= ratio; p.vy *= ratio;
-        p.speed *= ratio;
-        p.radius = PROJ_RADIUS_UNITS * sim.scale;
-        return p;
-      });
-      sim.running = prev.running;
+      // Rescale entities using world-space relative to center to handle aspect changes
+      const prevCenterX = prev.width / 2, prevCenterY = prev.height / 2;
+      const newCenterX = sim.width / 2, newCenterY = sim.height / 2;
+      const toWorldUnits = (px, py) => ({ ux: (px - prevCenterX) / prev.scale, uy: (py - prevCenterY) / prev.scale });
+      const toScreen = (ux, uy) => ({ x: newCenterX + ux * sim.scale, y: newCenterY + uy * sim.scale });
+
+      const cWU = toWorldUnits(prev.caster.x, prev.caster.y);
+      const cPX = toScreen(cWU.ux, cWU.uy);
+      sim.caster.x = cPX.x; sim.caster.y = cPX.y;
+      const bWU = toWorldUnits(prev.boss.x, prev.boss.y);
+      const bPX = toScreen(bWU.ux, bWU.uy);
+      sim.boss.x = bPX.x; sim.boss.y = bPX.y;
+      if (prev.running) {
+        // If actively resizing while running, reset to avoid unstable state
+        sim.projectiles = [];
+        sim.hitsTotal = 0;
+        sim.totalDamage = 0;
+        sim.hitTimestamps = [];
+        sim.castTargetLocks.clear();
+        sim.running = true;
+      } else {
+        // Carry-over projectiles with rescale when paused
+        sim.projectiles = prev.projectiles.map(p => {
+          const w = toWorldUnits(p.x, p.y);
+          const mapped = toScreen(w.ux, w.uy);
+          p.x = mapped.x; p.y = mapped.y;
+          p.vx *= ratio; p.vy *= ratio;
+          p.speed *= ratio;
+          p.radius = PROJ_RADIUS_UNITS * sim.scale;
+          return p;
+        });
+        sim.running = prev.running;
+      }
       window.__sim = sim;
     }
   };
