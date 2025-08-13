@@ -72,7 +72,7 @@ function applyParamsToDOM(params) {
   const setSelIf = (id, v) => { if (v !== undefined) document.getElementById(id).value = v; };
   setSelIf('arenaType', decodeArena(params.a));
   setIf('avgHit', params.ah);
-  setIf('projSpeed', params.ps);
+  setIf('projSpeedMod', params.ps);
   setIf('duration', params.d);
   setIf('projectileCount', params.pc);
   setIf('castSpeed', params.cs);
@@ -293,6 +293,8 @@ const ARENA_RADIUS_UNITS = 160; // circle arena radius in world units
 const BOSS_RADIUS_UNITS = 3;
 const CASTER_RADIUS_UNITS = 5;
 const PROJ_RADIUS_UNITS = 1.5;
+const BASE_PROJ_SPEED_UNITS = 82;
+const WANDER_INTENSITY = 0.50;
 
 /**
  * Event-driven wander to mimic Spark-like motion:
@@ -324,6 +326,7 @@ class Wander {
     this.truncLarge = 120 * DEG_TO_RAD; // cap large at 120°
     // Micro jitter: per sqrt(second)
     this.sigmaMicro = 4 * DEG_TO_RAD;
+    this.intensity = WANDER_INTENSITY;
 
     this.nextEventAt = this.t + this.sampleExp(this.lambda);
     this.pendingEvents = [];
@@ -352,7 +355,7 @@ class Wander {
   step(angle, dt) {
     this.t += dt;
     // Continuous micro jitter
-    angle += gaussian() * this.sigmaMicro * Math.sqrt(Math.max(dt, 0));
+    angle += gaussian() * this.sigmaMicro * Math.sqrt(Math.max(dt, 0)) * this.intensity;
 
     // Process any due events (base or burst)
     while (true) {
@@ -370,7 +373,7 @@ class Wander {
       const useLarge = Math.random() < this.pLarge;
       const sigma = useLarge ? this.sigmaLarge : this.sigmaSmall;
       const trunc = useLarge ? this.truncLarge : this.truncSmall;
-      const delta = this.sampleTruncatedNormal(sigma, trunc);
+      const delta = this.sampleTruncatedNormal(sigma, trunc) * this.intensity;
       angle += delta;
     }
 
@@ -678,7 +681,7 @@ class Simulation {
     return {
       arenaType: getSel('arenaType'),
       avgHit: getNum('avgHit'),
-      projSpeed: getNum('projSpeed'), // in world units per second
+      projSpeedMod: Number(document.getElementById('projSpeedMod').value),
       projectileCount: getNum('projectileCount'),
       castSpeed,
       castInterval: castSpeed > 0 ? 1 / castSpeed : Infinity,
@@ -703,7 +706,7 @@ class Simulation {
 
   installUI() {
     const ids = [
-      'arenaType','avgHit','projSpeed','projectileCount','castSpeed','duration','castShape','casterFacingDeg','pierceCount','forkTimes','chainCount','splitCount','forkChance','bossRadius'
+      'arenaType','avgHit','projSpeedMod','projectileCount','castSpeed','duration','castShape','casterFacingDeg','pierceCount','forkTimes','chainCount','splitCount','forkChance','bossRadius'
     ];
     for (const id of ids) {
       document.getElementById(id).addEventListener('input', () => {
@@ -717,7 +720,7 @@ class Simulation {
         writeURLParams({
           a: this.config.arenaType,
           ah: this.config.avgHit,
-          ps: this.config.projSpeed,
+          ps: this.config.projSpeedMod,
           d: this.config.duration,
           pc: this.config.projectileCount,
           cs: this.config.castSpeed,
@@ -744,7 +747,7 @@ class Simulation {
       writeURLParams({
         a: this.config.arenaType,
         ah: this.config.avgHit,
-        ps: this.config.projSpeed,
+        ps: this.config.projSpeedMod,
         d: this.config.duration,
         pc: this.config.projectileCount,
         cs: this.config.castSpeed,
@@ -789,7 +792,7 @@ class Simulation {
       writeURLParams({
         a: this.config.arenaType,
         ah: this.config.avgHit,
-        ps: this.config.projSpeed,
+        ps: this.config.projSpeedMod,
         d: this.config.duration,
         pc: this.config.projectileCount,
         cs: this.config.castSpeed,
@@ -841,7 +844,7 @@ class Simulation {
         x: this.caster.x,
         y: this.caster.y,
         angle,
-        speed: this.config.projSpeed * this.scale, // convert to pixels per second
+        speed: (BASE_PROJ_SPEED_UNITS * (this.config.projSpeedMod || 1)) * this.scale, // convert to pixels per second
         now,
         duration: this.config.duration,
         casterRef: this.caster,
