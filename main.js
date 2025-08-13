@@ -18,6 +18,28 @@ function randUnit() { return Math.random(); }
 function randRange(min, max) { return min + (max - min) * Math.random(); }
 function distance(a, b) { const dx = a.x - b.x; const dy = a.y - b.y; return Math.hypot(dx, dy); }
 
+// Human-readable short number formatting (e.g., 1.2K, 3.4M, 5.1T)
+function formatShortNumber(value, preferDecimals = 1) {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  let unit = '';
+  let div = 1;
+  let decimals = preferDecimals;
+
+  if (abs >= 1e15) { unit = 'Q'; div = 1e15; decimals = 1; }
+  else if (abs >= 1e12) { unit = 'T'; div = 1e12; decimals = 1; }
+  else if (abs >= 1e9) { unit = 'B'; div = 1e9; decimals = 1; }
+  else if (abs >= 1e6) { unit = 'M'; div = 1e6; decimals = 2; }
+  else if (abs >= 1e3) { unit = 'K'; div = 1e3; decimals = 2; }
+  else if (abs >= 1) { unit = ''; div = 1; decimals = 0; }
+  else { unit = ''; div = 1; decimals = Math.min(3, preferDecimals || 2); }
+
+  if (unit) return sign + (abs / div).toFixed(decimals) + unit;
+  // No unit
+  const rounded = decimals > 0 ? abs.toFixed(decimals) : Math.round(abs).toString();
+  return sign + rounded;
+}
+
 // Returns the earliest fraction t in [0,1] where a moving circle (center p -> p + d) intersects a target circle
 // Implemented as ray-circle intersection with the target radius expanded by mover radius already included by caller
 function sweptCircleHitT(px, py, dx, dy, cx, cy, R) {
@@ -82,6 +104,82 @@ function closestPointsBetweenSegments(p0x, p0y, p1x, p1y, q0x, q0y, q1x, q1y) {
   const qx = q0x + tc * vx, qy = q0y + tc * vy;
   const dx = px - qx, dy = py - qy;
   return { sc, tc, px, py, qx, qy, dist: Math.hypot(dx, dy) };
+}
+
+// Closest point from a point P to a segment AB
+function closestPointOnSegment(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const vLen2 = vx * vx + vy * vy || 1;
+  let t = (wx * vx + wy * vy) / vLen2;
+  t = clamp(t, 0, 1);
+  const cx = ax + t * vx;
+  const cy = ay + t * vy;
+  const dx = px - cx, dy = py - cy;
+  return { t, cx, cy, dist: Math.hypot(dx, dy) };
+}
+
+// Exact time-of-impact for a moving circle center P = P0 + t*d against a thickened segment AB (capsule of radius r)
+// Returns earliest t in [0,1] and collision normal at contact, or null if no hit
+function sweptCircleSegmentTOI(p0x, p0y, dx, dy, ax, ay, bx, by, r) {
+  // Precompute segment basis
+  const ux = bx - ax, uy = by - ay;
+  const L = Math.hypot(ux, uy);
+  if (L === 0) {
+    // Degenerates to circle at A
+    const tCircle = sweptCircleHitT(p0x, p0y, dx, dy, ax, ay, r);
+    if (tCircle == null) return null;
+    const cx = ax, cy = ay;
+    const px = p0x + dx * tCircle, py = p0y + dy * tCircle;
+    const nx = (px - cx) / (Math.hypot(px - cx, py - cy) || 1);
+    const ny = (py - cy) / (Math.hypot(px - cx, py - cy) || 1);
+    return { t: tCircle, nx, ny };
+  }
+  const unx = ux / L, uny = uy / L; // tangent
+  const nx0 = -uny, ny0 = unx;      // unit normal
+
+  // Infinite strip intersections: solve n·(P0 + t d - A) = ±r
+  const p0n = nx0 * (p0x - ax) + ny0 * (p0y - ay);
+  const dn = nx0 * dx + ny0 * dy;
+  const candidates = [];
+  const EPS = 1e-9;
+  if (Math.abs(dn) > EPS) {
+    for (const sgn of [+1, -1]) {
+      const t = (sgn * r - p0n) / dn;
+      if (t >= -EPS && t <= 1 + EPS) {
+        const px = p0x + dx * t;
+        const py = p0y + dy * t;
+        const s = unx * (px - ax) + uny * (py - ay); // projection along segment
+        if (s >= -EPS && s <= L + EPS) {
+          const normSign = Math.sign(nx0 * (px - ax) + ny0 * (py - ay));
+          const nx = (normSign >= 0) ? nx0 : -nx0;
+          const ny = (normSign >= 0) ? ny0 : -ny0;
+          candidates.push({ t: Math.max(0, Math.min(1, t)), nx, ny });
+        }
+      }
+    }
+  }
+
+  // Endcap circles at A and B
+  const tA = sweptCircleHitT(p0x, p0y, dx, dy, ax, ay, r);
+  if (tA != null && tA >= 0 && tA <= 1) {
+    const px = p0x + dx * tA, py = p0y + dy * tA;
+    const vax = px - ax, vay = py - ay; const len = Math.hypot(vax, vay) || 1;
+    candidates.push({ t: tA, nx: vax / len, ny: vay / len });
+  }
+  const tB = sweptCircleHitT(p0x, p0y, dx, dy, bx, by, r);
+  if (tB != null && tB >= 0 && tB <= 1) {
+    const px = p0x + dx * tB, py = p0y + dy * tB;
+    const vbx = px - bx, vby = py - by; const len = Math.hypot(vbx, vby) || 1;
+    candidates.push({ t: tB, nx: vbx / len, ny: vby / len });
+  }
+
+  if (!candidates.length) return null;
+  let best = candidates[0];
+  for (let i = 1; i < candidates.length; i++) {
+    if (candidates[i].t < best.t) best = candidates[i];
+  }
+  return best;
 }
 
 /** PoE Spark target cooldown per-cast per-enemy (seconds) */
@@ -729,27 +827,23 @@ class Simulation {
 
         // Terrain collision (reflect). Use swept test against T-junction segments if applicable
         if (this.arena instanceof TJunctionArena) {
-          // moving circle vs line segments (swept): approximate by segment-to-segment distance
-          const nx = proj.vx * subdt; const ny = proj.vy * subdt;
-          const p0x = proj.x - nx, p0y = proj.y - ny;
-          const p1x = proj.x, p1y = proj.y;
+          // Exact TOI: moving circle vs each wall capsule (segment thickened by radius)
+          const dx = proj.vx * subdt; const dy = proj.vy * subdt;
+          const p0x = proj.x - dx, p0y = proj.y - dy;
+          let best = null;
           for (const seg of this.arena.segments) {
-            const cp = closestPointsBetweenSegments(p0x, p0y, p1x, p1y, seg.x1, seg.y1, seg.x2, seg.y2);
-            if (cp.dist < proj.radius) {
-              // back up slightly and reflect
-              const hitT = cp.sc; // along projectile path
-              // place at contact point minus small epsilon outward
-              const px = p0x + (p1x - p0x) * hitT;
-              const py = p0y + (p1y - p0y) * hitT;
-              // normal = from closest point on wall to projectile path point
-              const wx = cp.px - cp.qx; const wy = cp.py - cp.qy;
-              const len = Math.hypot(wx, wy) || 1;
-              const nxn = wx / len; const nyn = wy / len;
-              proj.x = cp.qx + nxn * proj.radius;
-              proj.y = cp.qy + nyn * proj.radius;
-              proj.reflect(nxn, nyn);
-              break;
+            const hit = sweptCircleSegmentTOI(p0x, p0y, dx, dy, seg.x1, seg.y1, seg.x2, seg.y2, proj.radius);
+            if (hit && hit.t >= 0 && hit.t <= 1) {
+              if (!best || hit.t < best.t) best = hit;
             }
+          }
+          if (best) {
+            // advance to contact and reflect by provided normal
+            proj.x = p0x + dx * best.t + best.nx * (proj.radius * 1.001);
+            proj.y = p0y + dy * best.t + best.ny * (proj.radius * 1.001);
+            proj.reflect(best.nx, best.ny);
+          } else {
+            // no terrain hit in substep
           }
         } else {
           const hit = this.arena.collideCircle(proj.x, proj.y, proj.radius);
@@ -822,12 +916,12 @@ class Simulation {
 
   updateStats() {
     const hitsPerSec = this.hitTimestamps.length / 5;
-    document.getElementById('hitsTotal').textContent = String(this.hitsTotal);
+    document.getElementById('hitsTotal').textContent = formatShortNumber(this.hitsTotal, 1);
     document.getElementById('hitsPerSec').textContent = hitsPerSec.toFixed(2);
     const dps = hitsPerSec * this.config.avgHit;
-    document.getElementById('dps').textContent = dps.toFixed(1);
-    document.getElementById('totalDmg').textContent = String(Math.round(this.totalDamage));
-    document.getElementById('projAlive').textContent = String(this.projectiles.length);
+    document.getElementById('dps').textContent = formatShortNumber(dps, 1);
+    document.getElementById('totalDmg').textContent = formatShortNumber(this.totalDamage, 1);
+    document.getElementById('projAlive').textContent = formatShortNumber(this.projectiles.length, 0);
     this.updateCharts(hitsPerSec, dps);
   }
 
