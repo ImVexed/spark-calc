@@ -40,6 +40,109 @@ function formatShortNumber(value, preferDecimals = 1) {
   return sign + rounded;
 }
 
+// URL param helpers: serialize/deserialize UI + positions
+function parseURLParams() {
+  const p = new URLSearchParams(window.location.search);
+  const num = (k) => (p.has(k) ? Number(p.get(k)) : undefined);
+  const str = (k) => (p.has(k) ? p.get(k) : undefined);
+  const out = {
+    a: str('a'), // arenaType (short code)
+    ah: num('ah'), // avgHit
+    ps: num('ps'), // projSpeed
+    d: num('d'), // duration
+    pc: num('pc'), // projectileCount
+    cs: num('cs'), // castSpeed
+    shape: str('shape'), // castShape (short code)
+    face: num('face'), // casterFacingDeg
+    pr: num('pr'), // pierceCount
+    fk: num('fk'), // forkTimes
+    fc: num('fc'), // forkChance
+    ch: num('ch'), // chainCount
+    sp: num('sp'), // splitCount
+    er: num('er'), // bossRadius
+    ts: num('ts'), // chart window (seconds)
+    cx: num('cx'), cy: num('cy'), // caster pos (0..1)
+    bx: num('bx'), by: num('by'), // boss pos (0..1)
+  };
+  return out;
+}
+
+function applyParamsToDOM(params) {
+  const setIf = (id, v) => { if (v !== undefined && !Number.isNaN(v)) document.getElementById(id).value = String(v); };
+  const setSelIf = (id, v) => { if (v !== undefined) document.getElementById(id).value = v; };
+  setSelIf('arenaType', decodeArena(params.a));
+  setIf('avgHit', params.ah);
+  setIf('projSpeed', params.ps);
+  setIf('duration', params.d);
+  setIf('projectileCount', params.pc);
+  setIf('castSpeed', params.cs);
+  setSelIf('castShape', decodeShape(params.shape));
+  setIf('casterFacingDeg', params.face);
+  setIf('pierceCount', params.pr);
+  setIf('forkTimes', params.fk);
+  setIf('forkChance', params.fc);
+  setIf('chainCount', params.ch);
+  setIf('splitCount', params.sp);
+  setIf('bossRadius', params.er);
+  if (params.ts !== undefined && !Number.isNaN(params.ts)) document.getElementById('timeScale').value = String(params.ts);
+  const pos = {};
+  if (params.cx !== undefined && params.cy !== undefined) pos.caster = { x: clamp(params.cx, 0, 1), y: clamp(params.cy, 0, 1) };
+  if (params.bx !== undefined && params.by !== undefined) pos.boss = { x: clamp(params.bx, 0, 1), y: clamp(params.by, 0, 1) };
+  return pos;
+}
+
+function writeURLParams(state) {
+  const p = new URLSearchParams();
+  const set = (k, v) => { if (v !== undefined && v !== null && v !== '') p.set(k, String(v)); };
+  set('a', encodeArena(state.a));
+  set('ah', state.ah);
+  set('ps', state.ps);
+  set('d', state.d);
+  set('pc', state.pc);
+  set('cs', state.cs);
+  set('shape', encodeShape(state.shape));
+  set('face', state.face);
+  set('pr', state.pr);
+  set('fk', state.fk);
+  set('fc', state.fc);
+  set('ch', state.ch);
+  set('sp', state.sp);
+  set('er', state.er);
+  set('ts', state.ts);
+  const fmt = (v) => {
+    const s = Number(v).toFixed(3);
+    return s.replace(/\.0+$/, '').replace(/\.(\d*?)0+$/, '.$1');
+  };
+  if (state.cx !== undefined) set('cx', fmt(state.cx));
+  if (state.cy !== undefined) set('cy', fmt(state.cy));
+  if (state.bx !== undefined) set('bx', fmt(state.bx));
+  if (state.by !== undefined) set('by', fmt(state.by));
+  const url = window.location.pathname + '?' + p.toString();
+  window.history.replaceState(null, '', url);
+}
+
+// Short code encoders/decoders
+function encodeArena(v) {
+  if (v === 'tjunction' || v === 't') return 't';
+  if (v === 'square' || v === 's') return 's';
+  return 'c'; // circle
+}
+function decodeArena(v) {
+  if (v === 't') return 'tjunction';
+  if (v === 's') return 'square';
+  if (v === 'c') return 'circle';
+  return v || 'circle';
+}
+function encodeShape(v) {
+  if (v === 'cone' || v === 'n') return 'n';
+  return 'c'; // circular
+}
+function decodeShape(v) {
+  if (v === 'n') return 'cone';
+  if (v === 'c') return 'circular';
+  return v || 'circular';
+}
+
 // Returns the earliest fraction t in [0,1] where a moving circle (center p -> p + d) intersects a target circle
 // Implemented as ray-circle intersection with the target radius expanded by mover radius already included by caller
 function sweptCircleHitT(px, py, dx, dy, cx, cy, R) {
@@ -522,6 +625,9 @@ class Simulation {
     this.running = false;
     this.castAccumulator = 0;
     this.castCooldown = 0; // computed from cast speed
+    // Load from URL params first
+    const __params = parseURLParams();
+    const __pos = applyParamsToDOM(__params);
     this.config = this.readConfigFromDOM();
     this.arena = this.createArena(this.config.arenaType);
     // Metrics history for spark charts
@@ -533,6 +639,12 @@ class Simulation {
     };
     // Apply initial enemy radius from config
     this.boss.r = clamp(this.config.bossRadius || BOSS_RADIUS_UNITS, 0.1, 999) * this.scale;
+
+    // Apply initial enemy radius from config
+    this.boss.r = clamp(this.config.bossRadius || BOSS_RADIUS_UNITS, 0.1, 999) * this.scale;
+    // Apply positions from URL (normalized 0..1)
+    if (__pos.caster) { this.caster.x = __pos.caster.x * this.width; this.caster.y = __pos.caster.y * this.height; }
+    if (__pos.boss) { this.boss.x = __pos.boss.x * this.width; this.boss.y = __pos.boss.y * this.height; }
 
     // Hit tracking
     this.hitsTotal = 0;
@@ -600,12 +712,56 @@ class Simulation {
         document.getElementById('coneOptions').style.display = this.config.castShape === 'cone' ? 'block' : 'none';
         // live-apply enemy radius
         this.boss.r = clamp(this.config.bossRadius, 0.1, 999) * this.scale;
+
+        // write URL params on any config change
+        writeURLParams({
+          a: this.config.arenaType,
+          ah: this.config.avgHit,
+          ps: this.config.projSpeed,
+          d: this.config.duration,
+          pc: this.config.projectileCount,
+          cs: this.config.castSpeed,
+          shape: this.config.castShape,
+          face: this.config.casterFacingDeg,
+          pr: this.config.pierceCount,
+          fk: this.config.forkTimes,
+          fc: this.config.forkChance,
+          ch: this.config.chainCount,
+          sp: this.config.splitCount,
+          er: this.config.bossRadius,
+          ts: this.metrics.windowSec,
+          cx: this.caster.x / this.width,
+          cy: this.caster.y / this.height,
+          bx: this.boss.x / this.width,
+          by: this.boss.y / this.height,
+        });
       });
     }
 
     document.getElementById('timeScale').addEventListener('change', (e) => {
       const sec = Number(e.target.value);
       this.metrics.windowSec = clamp(sec, 1, 600);
+      writeURLParams({
+        a: this.config.arenaType,
+        ah: this.config.avgHit,
+        ps: this.config.projSpeed,
+        d: this.config.duration,
+        pc: this.config.projectileCount,
+        cs: this.config.castSpeed,
+        shape: this.config.castShape,
+        face: this.config.casterFacingDeg,
+        pr: this.config.pierceCount,
+        fk: this.config.forkTimes,
+        fc: this.config.forkChance,
+        ch: this.config.chainCount,
+        sp: this.config.splitCount,
+        er: this.config.bossRadius,
+        ts: this.metrics.windowSec,
+        cx: this.caster.x / this.width,
+        cy: this.caster.y / this.height,
+        bx: this.boss.x / this.width,
+        by: this.boss.y / this.height,
+      });
     });
 
     document.getElementById('startBtn').addEventListener('click', () => { this.running = true; });
@@ -629,6 +785,28 @@ class Simulation {
       const p = toCanvas(e);
       if (this.dragging === 'caster') { this.caster.x = p.x; this.caster.y = p.y; }
       if (this.dragging === 'boss') { this.boss.x = p.x; this.boss.y = p.y; }
+      // update URL for positions
+      writeURLParams({
+        a: this.config.arenaType,
+        ah: this.config.avgHit,
+        ps: this.config.projSpeed,
+        d: this.config.duration,
+        pc: this.config.projectileCount,
+        cs: this.config.castSpeed,
+        shape: this.config.castShape,
+        face: this.config.casterFacingDeg,
+        pr: this.config.pierceCount,
+        fk: this.config.forkTimes,
+        fc: this.config.forkChance,
+        ch: this.config.chainCount,
+        sp: this.config.splitCount,
+        er: this.config.bossRadius,
+        ts: this.metrics.windowSec,
+        cx: this.caster.x / this.width,
+        cy: this.caster.y / this.height,
+        bx: this.boss.x / this.width,
+        by: this.boss.y / this.height,
+      });
     });
     window.addEventListener('mouseup', () => {
       this.dragging = null; this.caster.drag = false; this.boss.drag = false;
