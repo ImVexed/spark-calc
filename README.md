@@ -6,7 +6,7 @@ Client-side, zero-backend web app to visualize and approximate Path of Exile's S
 
 Current assumptions I couldn't find definitive answers to:
 -----------
-- How many units/s does Spark move at base? Gem states `Projectile Speed: 420`, no idea what units that is in. 82 unit/s seems to match in game roughly.
+- How many units/s does Spark move at base? Gem states `Projectile Speed: 420`, we assume this is meters/min. So we currently use 70 unit/s.
 - Spark cone angle is 90 degrees. 
 - Maven/Most bosses are 3 units.
 - Maven arena is 160 units.
