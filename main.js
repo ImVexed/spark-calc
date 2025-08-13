@@ -1,22 +1,62 @@
-/*
-  Spark simulator
-  - Canvas-based 2D environment
-  - Configurable projectile speed, duration, pierce/fork/chain/split
-  - Circular or cone emission
-  - Per-cast hit cooldown (0.66s) shared across all projectiles from the same cast and same target
-  - Arena variants: circle, square, T-junction
-
-  Coordinates: use world units with dynamic pixel scale.
-*/
+/* Spark simulator (client-only, Canvas 2D). Physics runs in world units scaled to pixels. */
 
 /* Utility */
 const TWO_PI = Math.PI * 2;
 const DEG_TO_RAD = Math.PI / 180;
+const FORK_ANGLE_RAD = 60 * DEG_TO_RAD;
 
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function randUnit() { return Math.random(); }
 function randRange(min, max) { return min + (max - min) * Math.random(); }
 function distance(a, b) { const dx = a.x - b.x; const dy = a.y - b.y; return Math.hypot(dx, dy); }
+
+// Minimal DOM cache to avoid repeated lookups
+const __domCache = new Map();
+function el(id) {
+  let node = __domCache.get(id);
+  if (!node) { node = document.getElementById(id); __domCache.set(id, node); }
+  return node;
+}
+
+// Screen/world conversions (world normalized to arena radius)
+function toWorldNorm(sim, px, py) {
+  const cx = sim.width / 2, cy = sim.height / 2;
+  return {
+    x: (px - cx) / (sim.scale * ARENA_RADIUS_UNITS),
+    y: (py - cy) / (sim.scale * ARENA_RADIUS_UNITS),
+  };
+}
+function fromWorldNorm(sim, wx, wy) {
+  const cx = sim.width / 2, cy = sim.height / 2;
+  return {
+    x: cx + (wx * ARENA_RADIUS_UNITS) * sim.scale,
+    y: cy + (wy * ARENA_RADIUS_UNITS) * sim.scale,
+  };
+}
+function buildURLState(sim) {
+  const casterW = toWorldNorm(sim, sim.caster.x, sim.caster.y);
+  const bossW = toWorldNorm(sim, sim.boss.x, sim.boss.y);
+  return {
+    a: sim.config.arenaType,
+    ah: sim.config.avgHit,
+    ps: sim.config.projSpeedMod,
+    d: sim.config.duration,
+    pc: sim.config.projectileCount,
+    cs: sim.config.castSpeed,
+    shape: sim.config.castShape,
+    face: sim.config.casterFacingDeg,
+    pr: sim.config.pierceCount,
+    fk: sim.config.forkTimes,
+    fc: sim.config.forkChance,
+    ch: sim.config.chainCount,
+    sp: sim.config.splitCount,
+    er: sim.config.bossRadius,
+    ts: sim.metrics.windowSec,
+    cxu: casterW.x, cyu: casterW.y,
+    bxu: bossW.x, byu: bossW.y,
+  };
+}
+function updateURL(sim) { writeURLParams(buildURLState(sim)); }
 
 // Human-readable short number formatting (compact, trims trailing zeros)
 function formatShortNumber(value, preferDecimals = 1) {
@@ -44,7 +84,7 @@ function formatShortNumber(value, preferDecimals = 1) {
   return sign + rounded;
 }
 
-// URL param helpers: serialize/deserialize UI + positions
+// URL helpers: serialize/deserialize UI + positions for deep links
 function parseURLParams() {
   const p = new URLSearchParams(window.location.search);
   const num = (k) => (p.has(k) ? Number(p.get(k)) : undefined);
@@ -75,8 +115,8 @@ function parseURLParams() {
 }
 
 function applyParamsToDOM(params) {
-  const setIf = (id, v) => { if (v !== undefined && !Number.isNaN(v)) document.getElementById(id).value = String(v); };
-  const setSelIf = (id, v) => { if (v !== undefined) document.getElementById(id).value = v; };
+  const setIf = (id, v) => { if (v !== undefined && !Number.isNaN(v)) el(id).value = String(v); };
+  const setSelIf = (id, v) => { if (v !== undefined) el(id).value = v; };
   setSelIf('arenaType', decodeArena(params.a));
   setIf('avgHit', params.ah);
   setIf('projSpeedMod', params.ps);
@@ -91,15 +131,13 @@ function applyParamsToDOM(params) {
   setIf('chainCount', params.ch);
   setIf('splitCount', params.sp);
   setIf('bossRadius', params.er);
-  if (params.ts !== undefined && !Number.isNaN(params.ts)) document.getElementById('timeScale').value = String(params.ts);
-  const pos = {};
-  // Prefer world-normalized positions if provided
-  if (params.cxu !== undefined && params.cyu !== undefined) pos.casterWorld = { x: params.cxu, y: params.cyu };
-  if (params.bxu !== undefined && params.byu !== undefined) pos.bossWorld = { x: params.bxu, y: params.byu };
-  // Fallback to legacy canvas-normalized
-  if (!pos.casterWorld && params.cx !== undefined && params.cy !== undefined) pos.caster = { x: clamp(params.cx, 0, 1), y: clamp(params.cy, 0, 1) };
-  if (!pos.bossWorld && params.bx !== undefined && params.by !== undefined) pos.boss = { x: clamp(params.bx, 0, 1), y: clamp(params.by, 0, 1) };
-  return pos;
+  if (params.ts !== undefined && !Number.isNaN(params.ts)) el('timeScale').value = String(params.ts);
+  return {
+    casterWorld: (params.cxu !== undefined && params.cyu !== undefined) ? { x: params.cxu, y: params.cyu } : undefined,
+    bossWorld: (params.bxu !== undefined && params.byu !== undefined) ? { x: params.bxu, y: params.byu } : undefined,
+    caster: (params.cx !== undefined && params.cy !== undefined) ? { x: clamp(params.cx, 0, 1), y: clamp(params.cy, 0, 1) } : undefined,
+    boss: (params.bx !== undefined && params.by !== undefined) ? { x: clamp(params.bx, 0, 1), y: clamp(params.by, 0, 1) } : undefined,
+  };
 }
 
 function writeURLParams(state) {
@@ -161,8 +199,7 @@ function decodeShape(v) {
   return v || 'circular';
 }
 
-// Returns the earliest fraction t in [0,1] where a moving circle (center p -> p + d) intersects a target circle
-// Implemented as ray-circle intersection with the target radius expanded by mover radius already included by caller
+// Returns earliest t in [0,1] for moving circle vs target circle (ray-circle intersection).
 function sweptCircleHitT(px, py, dx, dy, cx, cy, R) {
   // Solve |(p + t d) - c|^2 = R^2 => (d·d) t^2 + 2 d·(p-c) t + |p-c|^2 - R^2 = 0
   const mx = px - cx, my = py - cy;
@@ -184,8 +221,7 @@ function sweptCircleHitT(px, py, dx, dy, cx, cy, R) {
   return t;
 }
 
-// Closest points between two segments P0->P1 and Q0->Q1
-// Returns {sc, tc, px, py, qx, qy, dist}
+// Closest points between segments P0->P1 and Q0->Q1; used for CCD support.
 function closestPointsBetweenSegments(p0x, p0y, p1x, p1y, q0x, q0y, q1x, q1y) {
   const ux = p1x - p0x, uy = p1y - p0y;
   const vx = q1x - q0x, vy = q1y - q0y;
@@ -227,7 +263,7 @@ function closestPointsBetweenSegments(p0x, p0y, p1x, p1y, q0x, q0y, q1x, q1y) {
   return { sc, tc, px, py, qx, qy, dist: Math.hypot(dx, dy) };
 }
 
-// Closest point from a point P to a segment AB
+// Closest point from a point P to segment AB (projection clamped to [0,1]).
 function closestPointOnSegment(px, py, ax, ay, bx, by) {
   const vx = bx - ax, vy = by - ay;
   const wx = px - ax, wy = py - ay;
@@ -240,8 +276,7 @@ function closestPointOnSegment(px, py, ax, ay, bx, by) {
   return { t, cx, cy, dist: Math.hypot(dx, dy) };
 }
 
-// Exact time-of-impact for a moving circle center P = P0 + t*d against a thickened segment AB (capsule of radius r)
-// Returns earliest t in [0,1] and collision normal at contact, or null if no hit
+// Exact time-of-impact for moving circle vs capsule segment; returns {t, nx, ny} or null.
 function sweptCircleSegmentTOI(p0x, p0y, dx, dy, ax, ay, bx, by, r) {
   // Precompute segment basis
   const ux = bx - ax, uy = by - ay;
@@ -303,10 +338,10 @@ function sweptCircleSegmentTOI(p0x, p0y, dx, dy, ax, ay, bx, by, r) {
   return best;
 }
 
-/** PoE Spark target cooldown per-cast per-enemy (seconds) */
+// Per-cast, per-target hit cooldown in seconds
 const PER_CAST_TARGET_COOLDOWN = 0.66;
 
-/** World unit references */
+// World unit references
 const ARENA_RADIUS_UNITS = 160; // circle arena radius in world units
 const BOSS_RADIUS_UNITS = 3;
 const CASTER_RADIUS_UNITS = 3;
@@ -399,7 +434,7 @@ class Wander {
   }
 }
 
-/** Arena shape base + variants */
+// Arena shape base + variants
 class Arena {
   constructor(width, height) { this.width = width; this.height = height; }
   // return {hit:boolean, nx:number, ny:number, reflect:boolean, x:number, y:number}
@@ -551,7 +586,7 @@ class TJunctionArena extends Arena {
   }
 }
 
-/** Entities */
+// Entity (player/boss)
 class Entity {
   constructor(x, y, r, color) { this.x = x; this.y = y; this.r = r; this.color = color; this.drag = false; }
   draw(ctx) {
@@ -565,7 +600,7 @@ class Entity {
   contains(px, py) { return Math.hypot(px - this.x, py - this.y) <= this.r; }
 }
 
-/** Projectile */
+// Projectile
 let nextCastId = 1;
 class Projectile {
   constructor(config) {
@@ -659,48 +694,21 @@ class Simulation {
     this.boss.r = clamp(this.config.bossRadius || BOSS_RADIUS_UNITS, 0.1, 999) * this.scale;
 
     // Apply positions from URL
-    const centerX = this.width / 2; const centerY = this.height / 2;
     if (__pos.casterWorld) {
-      this.caster.x = centerX + (__pos.casterWorld.x * ARENA_RADIUS_UNITS) * this.scale;
-      this.caster.y = centerY + (__pos.casterWorld.y * ARENA_RADIUS_UNITS) * this.scale;
+      const p = fromWorldNorm(this, __pos.casterWorld.x, __pos.casterWorld.y);
+      this.caster.x = p.x; this.caster.y = p.y;
     } else if (__pos.caster) {
-      this.caster.x = __pos.caster.x * this.width;
-      this.caster.y = __pos.caster.y * this.height;
+      this.caster.x = __pos.caster.x * this.width; this.caster.y = __pos.caster.y * this.height;
     }
     if (__pos.bossWorld) {
-      this.boss.x = centerX + (__pos.bossWorld.x * ARENA_RADIUS_UNITS) * this.scale;
-      this.boss.y = centerY + (__pos.bossWorld.y * ARENA_RADIUS_UNITS) * this.scale;
+      const p = fromWorldNorm(this, __pos.bossWorld.x, __pos.bossWorld.y);
+      this.boss.x = p.x; this.boss.y = p.y;
     } else if (__pos.boss) {
-      this.boss.x = __pos.boss.x * this.width;
-      this.boss.y = __pos.boss.y * this.height;
+      this.boss.x = __pos.boss.x * this.width; this.boss.y = __pos.boss.y * this.height;
     }
 
     // Ensure we always populate world-normalized positions in URL for sharing (prefer world coords only)
-    const worldCasterX0 = (this.caster.x - centerX) / (this.scale * ARENA_RADIUS_UNITS);
-    const worldCasterY0 = (this.caster.y - centerY) / (this.scale * ARENA_RADIUS_UNITS);
-    const worldBossX0 = (this.boss.x - centerX) / (this.scale * ARENA_RADIUS_UNITS);
-    const worldBossY0 = (this.boss.y - centerY) / (this.scale * ARENA_RADIUS_UNITS);
-    writeURLParams({
-      a: this.config.arenaType,
-      ah: this.config.avgHit,
-      ps: this.config.projSpeedMod,
-      d: this.config.duration,
-      pc: this.config.projectileCount,
-      cs: this.config.castSpeed,
-      shape: this.config.castShape,
-      face: this.config.casterFacingDeg,
-      pr: this.config.pierceCount,
-      fk: this.config.forkTimes,
-      fc: this.config.forkChance,
-      ch: this.config.chainCount,
-      sp: this.config.splitCount,
-      er: this.config.bossRadius,
-      ts: this.metrics.windowSec,
-      cxu: worldCasterX0,
-      cyu: worldCasterY0,
-      bxu: worldBossX0,
-      byu: worldBossY0,
-    });
+    updateURL(this);
 
     // Hit tracking
     this.hitsTotal = 0;
@@ -718,8 +726,70 @@ class Simulation {
     requestAnimationFrame((t) => this.loop(t));
   }
 
+  // Enemy behavior helpers (separate for clarity and testability)
+  applySplit(proj, nowTs) {
+    const n = Math.max(1, proj.splitCount);
+    for (let i = 0; i < n; i++) {
+      const theta = (i / n) * TWO_PI;
+      this.projectiles.push(new Projectile({
+        castId: proj.castId,
+        x: proj.x,
+        y: proj.y,
+        angle: theta,
+        speed: proj.speed,
+        now: nowTs,
+        duration: Math.max(0, proj.duration - proj.age(nowTs)),
+        casterRef: this.caster,
+        pierceCount: proj.pierceRemaining,
+        forkTimes: proj.forkRemaining,
+        chainCount: proj.chainRemaining,
+        splitCount: 0,
+      }));
+    }
+    return 'remove';
+  }
+
+  applyPierce(proj, dx, dy, d) {
+    proj.pierceRemaining -= 1;
+    // Nudge forward to avoid persistent overlap on the rim after a pierce
+    const nx = dx / (d || 1); const ny = dy / (d || 1);
+    proj.x = this.boss.x + nx * (this.boss.r + proj.radius + 0.5);
+    return 'keep';
+  }
+
+  applyFork(proj, nowTs) {
+    const base = Math.atan2(proj.vy, proj.vx);
+    const childAngles = [base + FORK_ANGLE_RAD, base - FORK_ANGLE_RAD];
+    if (Math.random() * 100 < this.config.forkChance) childAngles.push(base);
+    for (const a of childAngles) {
+      this.projectiles.push(new Projectile({
+        castId: proj.castId,
+        x: proj.x,
+        y: proj.y,
+        angle: a,
+        speed: proj.speed,
+        now: nowTs,
+        duration: Math.max(0, proj.duration - proj.age(nowTs)),
+        casterRef: this.caster,
+        pierceCount: proj.pierceRemaining,
+        forkTimes: proj.forkRemaining - 1,
+        chainCount: proj.chainRemaining,
+        splitCount: 0,
+      }));
+    }
+    return 'remove';
+  }
+
+  applyChain(proj, dx, dy, d) {
+    // Behave like pierce when no alternate target exists: decrement and continue through
+    if (proj.chainRemaining > 0) proj.chainRemaining -= 1;
+    const nx = dx / (d || 1); const ny = dy / (d || 1);
+    proj.x = this.boss.x + nx * (this.boss.r + proj.radius + 0.5);
+    return 'keep';
+  }
+
   computeScale() {
-    // Fit the 160u radius circle inside the canvas with some margin
+    // Fit target arena diameter inside the canvas with margin; keep scale >= 0.5 to avoid extremes
     const diameter = ARENA_RADIUS_UNITS * 2;
     const marginPx = 20;
     const sx = (this.width - marginPx * 2) / diameter;
@@ -728,26 +798,26 @@ class Simulation {
   }
 
   readConfigFromDOM() {
-    const getNum = (id) => Number(document.getElementById(id).value);
-    const getSel = (id) => document.getElementById(id).value;
+    const getNum = (id) => Number(el(id).value);
+    const getSel = (id) => el(id).value;
     const castSpeed = getNum('castSpeed');
     return {
       arenaType: getSel('arenaType'),
       avgHit: getNum('avgHit'),
-      projSpeedMod: Number(document.getElementById('projSpeedMod').value),
+      projSpeedMod: Number(el('projSpeedMod').value),
       projectileCount: getNum('projectileCount'),
       castSpeed,
       castInterval: castSpeed > 0 ? 1 / castSpeed : Infinity,
       duration: getNum('duration'),
       castShape: getSel('castShape'),
-      casterFacingDeg: Number(document.getElementById('casterFacingDeg').value),
+      casterFacingDeg: Number(el('casterFacingDeg').value),
       coneAngleDeg: 90,
       pierceCount: getNum('pierceCount'),
       forkTimes: getNum('forkTimes'),
       chainCount: getNum('chainCount'),
       splitCount: getNum('splitCount'),
-      forkChance: clamp(Number(document.getElementById('forkChance')?.value || 0), 0, 100),
-      bossRadius: Number(document.getElementById('bossRadius')?.value || BOSS_RADIUS_UNITS),
+      forkChance: clamp(Number(el('forkChance')?.value || 0), 0, 100),
+      bossRadius: Number(el('bossRadius')?.value || BOSS_RADIUS_UNITS),
     };
   }
 
@@ -770,59 +840,14 @@ class Simulation {
         this.boss.r = clamp(this.config.bossRadius, 0.1, 999) * this.scale;
 
         // write URL params on any config change
-        const centerX = this.width / 2, centerY = this.height / 2;
-        const worldCasterX = (this.caster.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
-        const worldCasterY = (this.caster.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
-        const worldBossX = (this.boss.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
-        const worldBossY = (this.boss.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
-        writeURLParams({
-          a: this.config.arenaType,
-          ah: this.config.avgHit,
-          ps: this.config.projSpeedMod,
-          d: this.config.duration,
-          pc: this.config.projectileCount,
-          cs: this.config.castSpeed,
-          shape: this.config.castShape,
-          face: this.config.casterFacingDeg,
-          pr: this.config.pierceCount,
-          fk: this.config.forkTimes,
-          fc: this.config.forkChance,
-          ch: this.config.chainCount,
-          sp: this.config.splitCount,
-          er: this.config.bossRadius,
-          ts: this.metrics.windowSec,
-          cxu: worldCasterX,
-          cyu: worldCasterY,
-          bxu: worldBossX,
-          byu: worldBossY,
-        });
+        updateURL(this);
       });
     }
 
     document.getElementById('timeScale').addEventListener('change', (e) => {
       const sec = Number(e.target.value);
       this.metrics.windowSec = clamp(sec, 1, 600);
-      writeURLParams({
-        a: this.config.arenaType,
-        ah: this.config.avgHit,
-        ps: this.config.projSpeedMod,
-        d: this.config.duration,
-        pc: this.config.projectileCount,
-        cs: this.config.castSpeed,
-        shape: this.config.castShape,
-        face: this.config.casterFacingDeg,
-        pr: this.config.pierceCount,
-        fk: this.config.forkTimes,
-        fc: this.config.forkChance,
-        ch: this.config.chainCount,
-        sp: this.config.splitCount,
-        er: this.config.bossRadius,
-        ts: this.metrics.windowSec,
-        cx: this.caster.x / this.width,
-        cy: this.caster.y / this.height,
-        bx: this.boss.x / this.width,
-        by: this.boss.y / this.height,
-      });
+      updateURL(this);
     });
 
     document.getElementById('startBtn').addEventListener('click', () => { this.running = true; });
@@ -847,32 +872,7 @@ class Simulation {
       if (this.dragging === 'caster') { this.caster.x = p.x; this.caster.y = p.y; }
       if (this.dragging === 'boss') { this.boss.x = p.x; this.boss.y = p.y; }
       // update URL for positions
-      const centerX = this.width / 2, centerY = this.height / 2;
-      const worldCasterX = (this.caster.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
-      const worldCasterY = (this.caster.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
-      const worldBossX = (this.boss.x - centerX) / this.scale / ARENA_RADIUS_UNITS;
-      const worldBossY = (this.boss.y - centerY) / this.scale / ARENA_RADIUS_UNITS;
-      writeURLParams({
-        a: this.config.arenaType,
-        ah: this.config.avgHit,
-        ps: this.config.projSpeedMod,
-        d: this.config.duration,
-        pc: this.config.projectileCount,
-        cs: this.config.castSpeed,
-        shape: this.config.castShape,
-        face: this.config.casterFacingDeg,
-        pr: this.config.pierceCount,
-        fk: this.config.forkTimes,
-        fc: this.config.forkChance,
-        ch: this.config.chainCount,
-        sp: this.config.splitCount,
-        er: this.config.bossRadius,
-        ts: this.metrics.windowSec,
-        cxu: worldCasterX,
-        cyu: worldCasterY,
-        bxu: worldBossX,
-        byu: worldBossY,
-      });
+      updateURL(this);
     });
     window.addEventListener('mouseup', () => {
       this.dragging = null; this.caster.drag = false; this.boss.drag = false;
@@ -895,7 +895,7 @@ class Simulation {
     if (cfg.castShape === 'circular') {
       for (let i = 0; i < count; i++) angles.push(randRange(0, TWO_PI));
     } else {
-      // Cone centered on caster's facing with configurable angle
+      // Cone centered on facing; only emission uses this angle
       const half = clamp(cfg.coneAngleDeg, 0, 360) * DEG_TO_RAD / 2;
       const facing = (cfg.casterFacingDeg || 0) * DEG_TO_RAD;
       for (let i = 0; i < count; i++) angles.push(facing + randRange(-half, half));
@@ -941,74 +941,27 @@ class Simulation {
     if (d <= proj.radius + this.boss.r) {
       const hitRegistered = this.tryApplyHit(proj, now);
       if (hitRegistered) {
-        // Order of operations: Split -> Pierce -> Fork -> Chain
-        // Only one operation may occur per collision.
+        // Only one behavior can occur per collision; priority: Split -> Pierce -> Fork -> Chain
 
-        // 1) Split (shoot evenly in a circle)
+        // 1) Split (even 360° emission).
         if (!proj.hasSplit && proj.splitCount > 0) {
           proj.hasSplit = true;
-          const n = Math.max(1, proj.splitCount);
-          for (let i = 0; i < n; i++) {
-            const theta = (i / n) * TWO_PI;
-            this.projectiles.push(new Projectile({
-              castId: proj.castId,
-              x: proj.x,
-              y: proj.y,
-              angle: theta,
-              speed: proj.speed,
-              now: performance.now(),
-              duration: Math.max(0, proj.duration - proj.age(performance.now())),
-              casterRef: this.caster,
-              pierceCount: proj.pierceRemaining,
-              forkTimes: proj.forkRemaining,
-              chainCount: proj.chainRemaining,
-              splitCount: 0,
-            }));
-          }
-          // Spark is absorbed on hit unless it pierces; since Split consumed the behavior, absorb original
-          return 'remove';
+          return this.applySplit(proj, performance.now());
         }
 
         // 2) Pierce
         if (proj.pierceRemaining > 0) {
-          proj.pierceRemaining -= 1;
-          // Nudge forward so it doesn't stick on the boss rim
-          const nx = dx / (d || 1); const ny = dy / (d || 1);
-          proj.x = this.boss.x + nx * (this.boss.r + proj.radius + 0.5);
-          return 'keep';
+          return this.applyPierce(proj, dx, dy, d);
         }
 
         // 3) Fork
         if (proj.forkRemaining > 0) {
-          const base = Math.atan2(proj.vy, proj.vx);
-          const forkAngle = 60 * DEG_TO_RAD;
-          const childAngles = [base + forkAngle, base - forkAngle];
-          if (Math.random() * 100 < this.config.forkChance) childAngles.push(base);
-          const nowTs = performance.now();
-          for (const a of childAngles) {
-            this.projectiles.push(new Projectile({
-              castId: proj.castId,
-              x: proj.x,
-              y: proj.y,
-              angle: a,
-              speed: proj.speed,
-              now: nowTs,
-              duration: Math.max(0, proj.duration - proj.age(nowTs)),
-              casterRef: this.caster,
-              pierceCount: proj.pierceRemaining,
-              forkTimes: proj.forkRemaining - 1,
-              chainCount: proj.chainRemaining,
-              splitCount: 0,
-            }));
-          }
-          // Original projectile is removed on fork
-          return 'remove';
+          return this.applyFork(proj, performance.now());
         }
 
-        // 4) Chain (requires another enemy; with single boss target, this will have no effect)
+        // 4) Chain (no other enemy → behave like pierce)
         if (proj.chainRemaining > 0) {
-          // No other targets -> absorbed
-          return 'remove';
+          return this.applyChain(proj, dx, dy, d);
         }
 
         // No remaining behaviors -> absorbed on hit
