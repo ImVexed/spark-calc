@@ -33,6 +33,9 @@ function fromWorldNorm(sim, wx, wy) {
     y: cy + (wy * ARENA_RADIUS_UNITS) * sim.scale,
   };
 }
+const URL_UPDATE_MIN_INTERVAL_MS = 500;
+const __urlUpdate = { lastAt: 0, timer: null, pending: null };
+
 function buildURLState(sim) {
   const casterW = toWorldNorm(sim, sim.caster.x, sim.caster.y);
   const bossW = toWorldNorm(sim, sim.boss.x, sim.boss.y);
@@ -56,7 +59,25 @@ function buildURLState(sim) {
     bxu: bossW.x, byu: bossW.y,
   };
 }
-function updateURL(sim) { writeURLParams(buildURLState(sim)); }
+function throttledWriteURL(state) {
+  __urlUpdate.pending = state;
+  if (__urlUpdate.timer != null) return;
+  const now = performance.now();
+  const elapsed = now - __urlUpdate.lastAt;
+  const delay = Math.max(0, URL_UPDATE_MIN_INTERVAL_MS - elapsed);
+  __urlUpdate.timer = window.setTimeout(() => {
+    __urlUpdate.timer = null;
+    const current = __urlUpdate.pending;
+    if (!current) return;
+    __urlUpdate.pending = null;
+    writeURLParams(current);
+    __urlUpdate.lastAt = performance.now();
+    // If additional updates queued while writing, schedule next flush
+    if (__urlUpdate.pending) throttledWriteURL(__urlUpdate.pending);
+  }, delay);
+}
+
+function updateURL(sim) { throttledWriteURL(buildURLState(sim)); }
 
 // Human-readable short number formatting (compact, trims trailing zeros)
 function formatShortNumber(value, preferDecimals = 1) {
@@ -842,6 +863,14 @@ class Simulation {
         // write URL params on any config change
         updateURL(this);
       });
+    }
+
+    // Ensure facing updates URL immediately on drag in all browsers
+    const facingEl = document.getElementById('casterFacingDeg');
+    if (facingEl) {
+      const onFace = () => { this.config.casterFacingDeg = Number(facingEl.value); updateURL(this); };
+      facingEl.addEventListener('input', onFace);
+      facingEl.addEventListener('change', onFace);
     }
 
     document.getElementById('timeScale').addEventListener('change', (e) => {
