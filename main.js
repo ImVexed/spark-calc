@@ -18,7 +18,7 @@ function randUnit() { return Math.random(); }
 function randRange(min, max) { return min + (max - min) * Math.random(); }
 function distance(a, b) { const dx = a.x - b.x; const dy = a.y - b.y; return Math.hypot(dx, dy); }
 
-// Human-readable short number formatting (e.g., 1.2K, 3.4M, 5.1T)
+// Human-readable short number formatting (compact, trims trailing zeros)
 function formatShortNumber(value, preferDecimals = 1) {
   const abs = Math.abs(value);
   const sign = value < 0 ? '-' : '';
@@ -26,17 +26,21 @@ function formatShortNumber(value, preferDecimals = 1) {
   let div = 1;
   let decimals = preferDecimals;
 
+  const trimZeros = (s) => s.replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
+
   if (abs >= 1e15) { unit = 'Q'; div = 1e15; decimals = 1; }
   else if (abs >= 1e12) { unit = 'T'; div = 1e12; decimals = 1; }
   else if (abs >= 1e9) { unit = 'B'; div = 1e9; decimals = 1; }
-  else if (abs >= 1e6) { unit = 'M'; div = 1e6; decimals = 2; }
-  else if (abs >= 1e3) { unit = 'K'; div = 1e3; decimals = 2; }
+  else if (abs >= 1e6) { unit = 'M'; div = 1e6; decimals = (abs / div) < 100 ? 1 : 0; }
+  else if (abs >= 1e3) { unit = 'K'; div = 1e3; decimals = (abs / div) < 100 ? 1 : 0; }
   else if (abs >= 1) { unit = ''; div = 1; decimals = 0; }
-  else { unit = ''; div = 1; decimals = Math.min(3, preferDecimals || 2); }
+  else { unit = ''; div = 1; decimals = Math.min(2, preferDecimals || 1); }
 
-  if (unit) return sign + (abs / div).toFixed(decimals) + unit;
-  // No unit
-  const rounded = decimals > 0 ? abs.toFixed(decimals) : Math.round(abs).toString();
+  if (unit) {
+    const s = (abs / div).toFixed(decimals);
+    return sign + trimZeros(s) + unit;
+  }
+  const rounded = decimals > 0 ? trimZeros(abs.toFixed(decimals)) : Math.round(abs).toString();
   return sign + rounded;
 }
 
@@ -291,7 +295,7 @@ const PER_CAST_TARGET_COOLDOWN = 0.66;
 /** World unit references */
 const ARENA_RADIUS_UNITS = 160; // circle arena radius in world units
 const BOSS_RADIUS_UNITS = 3;
-const CASTER_RADIUS_UNITS = 5;
+const CASTER_RADIUS_UNITS = 3;
 const PROJ_RADIUS_UNITS = 1.5;
 const BASE_PROJ_SPEED_UNITS = 80;
 const WANDER_INTENSITY = 0.66;
@@ -594,9 +598,9 @@ class Projectile {
     this.vy = this.vy - 2 * vdotn * ny;
     this.angle = Math.atan2(this.vy, this.vx);
   }
-  draw(ctx) {
+  draw(ctx, colorOverride) {
     ctx.save();
-    ctx.fillStyle = '#7cc5ff';
+    ctx.fillStyle = colorOverride || '#7cc5ff';
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.radius, 0, TWO_PI);
     ctx.fill();
@@ -636,7 +640,7 @@ class Simulation {
     // Metrics history for spark charts
     this.metrics = {
       windowSec: 10,
-      samples: [], // {t, hitsTotal, hitsPerSec, dps, totalDamage, projAlive}
+      samples: [], // {t, hitsTotal, hitsPerSec, dps, totalDamage, projAlive, cooldownPct}
       lastSampleAt: performance.now(),
       sampleIntervalMs: 200,
     };
@@ -1083,8 +1087,14 @@ class Simulation {
     this.caster.draw(ctx);
     this.boss.draw(ctx);
 
-    // Projectiles
-    for (const p of this.projectiles) p.draw(ctx);
+    // Projectiles (orange when cast's cooldown active for boss)
+    for (const p of this.projectiles) {
+      let override = undefined;
+      const key = p.castId + '|boss';
+      const nextOk = this.castTargetLocks.get(key) || 0;
+      if (performance.now() < nextOk) override = '#ffa94d';
+      p.draw(ctx, override);
+    }
 
     // Legend
     ctx.save();
@@ -1103,10 +1113,21 @@ class Simulation {
     document.getElementById('dps').textContent = formatShortNumber(dps, 1);
     document.getElementById('totalDmg').textContent = formatShortNumber(this.totalDamage, 1);
     document.getElementById('projAlive').textContent = formatShortNumber(this.projectiles.length, 0);
-    this.updateCharts(hitsPerSec, dps);
+    // cooldown percent = casts whose cooldown to boss is still active
+    const now = performance.now();
+    let castsOnCd = 0, castIds = new Set();
+    for (const p of this.projectiles) castIds.add(p.castId);
+    for (const id of castIds) {
+      const key = id + '|boss';
+      const nextOk = this.castTargetLocks.get(key) || 0;
+      if (now < nextOk) castsOnCd += 1;
+    }
+    const cooldownPct = castIds.size ? (castsOnCd / castIds.size) * 100 : 0;
+    document.getElementById('cooldownPct').textContent = cooldownPct.toFixed(0) + '%';
+    this.updateCharts(hitsPerSec, dps, cooldownPct);
   }
 
-  updateCharts(hitsPerSec, dps) {
+  updateCharts(hitsPerSec, dps, cooldownPct) {
     const now = performance.now();
     if (now - this.metrics.lastSampleAt >= this.metrics.sampleIntervalMs) {
       this.metrics.lastSampleAt = now;
@@ -1117,6 +1138,7 @@ class Simulation {
         dps,
         totalDamage: this.totalDamage,
         projAlive: this.projectiles.length,
+        cooldownPct,
       });
       // drop old samples beyond window
       const cutoff = now - this.metrics.windowSec * 1000;
@@ -1129,6 +1151,7 @@ class Simulation {
     this.drawSpark('sparkDps', s.map(p => p.dps));
     this.drawSpark('sparkDmg', s.map(p => p.totalDamage));
     this.drawSpark('sparkAlive', s.map(p => p.projAlive));
+    this.drawSpark('sparkCooldown', s.map(p => p.cooldownPct));
   }
 
   drawSpark(canvasId, values) {

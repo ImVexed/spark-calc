@@ -11,7 +11,7 @@
       <aside id="controls">
         <h2>Spark Simulator</h2>
         <section class="card">
-          <h3>Arena</h3>
+          <h3>Simulation</h3>
           <div class="field-group">
             <label for="arenaType">Arena Layout</label>
             <select id="arenaType">
@@ -19,6 +19,11 @@
               <option value="square">Square Arena</option>
               <option value="tjunction">T-Junction</option>
             </select>
+          </div>
+          <div class="buttons">
+            <button id="startBtn" class="btn-start">Start</button>
+            <button id="stopBtn" class="btn-stop">Stop</button>
+            <button id="resetBtn" class="btn-reset">Reset</button>
           </div>
         </section>
 
@@ -64,33 +69,34 @@
           <div class="field-group" id="coneOptions">
             <label for="casterFacingDeg">Caster Facing (degrees)</label>
             <input id="casterFacingDeg" type="range" value="0" min="-180" max="180" step="1" />
-            <div class="help">Cone is fixed at 90° around this facing. Initial spawn only; flight is governed by wander.</div>
           </div>
         </section>
 
         <section class="card">
           <h3>Behaviors</h3>
           <div class="field-group three-col">
-          <div>
-            <label for="pierceCount">Pierce Count</label>
-            <input id="pierceCount" type="number" value="0" min="0" step="1" />
+            <div>
+              <label for="pierceCount">Pierce Count</label>
+              <input id="pierceCount" type="number" value="0" min="0" step="1" />
+            </div>
+            <div>
+              <label for="forkTimes">Max Forks</label>
+              <input id="forkTimes" type="number" value="0" min="0" step="1" />
+            </div>
+            <div>
+              <label for="chainCount">Chain Count</label>
+              <input id="chainCount" type="number" value="0" min="0" step="1" />
+            </div>
           </div>
-          <div>
-            <label for="forkTimes">Max Forks</label>
-            <input id="forkTimes" type="number" value="0" min="0" step="1" />
-          </div>
-          <div>
-            <label for="chainCount">Chain Count</label>
-            <input id="chainCount" type="number" value="0" min="0" step="1" />
-          </div>
-          </div>
-          <div class="field-group">
-            <label for="forkChance">Fork: % chance to add center projectile</label>
-            <input id="forkChance" type="number" value="0" min="0" max="100" step="1" />
-          </div>
-          <div class="field-group">
-            <label for="splitCount">Split: projectiles created on hit</label>
-            <input id="splitCount" type="number" value="0" min="0" step="1" />
+          <div class="field-group two-col">
+            <div>
+              <label for="splitCount">Split: projectile count</label>
+              <input id="splitCount" type="number" value="0" min="0" step="1" />
+            </div>
+            <div>
+              <label for="forkChance">Fork: % add. projectile</label>
+              <input id="forkChance" type="number" value="0" min="0" max="100" step="1" />
+            </div>
           </div>
         </section>
 
@@ -104,14 +110,7 @@
 
         
 
-        <section class="card">
-          <h3>Simulation</h3>
-          <div class="buttons">
-            <button id="startBtn">Start</button>
-            <button id="stopBtn">Stop</button>
-            <button id="resetBtn">Reset</button>
-          </div>
-        </section>
+        
 
         <section class="card">
           <h3>Charts</h3>
@@ -130,7 +129,8 @@
             <div class="stat"><span>Hit Rate (/s):</span><strong id="hitsPerSec">0</strong><canvas id="sparkRate" class="spark" width="160" height="28"></canvas></div>
             <div class="stat"><span>DPS:</span><strong id="dps">0</strong><canvas id="sparkDps" class="spark" width="160" height="28"></canvas></div>
             <div class="stat"><span>Total Damage:</span><strong id="totalDmg">0</strong><canvas id="sparkDmg" class="spark" width="160" height="28"></canvas></div>
-            <div class="stat"><span>Projectiles alive:</span><strong id="projAlive">0</strong><canvas id="sparkAlive" class="spark" width="160" height="28"></canvas></div>
+            <div class="stat"><span>Projectiles:</span><strong id="projAlive">0</strong><canvas id="sparkAlive" class="spark" width="160" height="28"></canvas></div>
+            <div class="stat"><span>Casts on CD:</span><strong id="cooldownPct">0%</strong><canvas id="sparkCooldown" class="spark" width="160" height="28"></canvas></div>
           </div>
         </section>
 

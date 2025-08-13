@@ -75,16 +75,32 @@ input, select {
 .checkbox { display: flex; align-items: center; gap: 8px; }
 .checkbox input { width: auto; }
 
-.buttons { display: flex; gap: 8px; margin: 12px 0; }
+.buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; width: 100%; }
 .buttons button {
   background: #1a2234;
   color: var(--text);
   border: 1px solid #2a3146;
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   cursor: pointer;
+  width: 100%;
 }
 .buttons button:hover { filter: brightness(1.15); }
+
+/* Stronger specificity so these override the generic .buttons button rule */
+.buttons .btn-start { background: #198754; border-color: #146c43; }
+.buttons .btn-stop { background: #dc3545; border-color: #b02a37; }
+.buttons .btn-reset { background: #2a3146; border-color: #20273a; }
+
+/* Compact button row */
+.buttons { gap: 8px; }
+
+.sim-grid {
+  display: grid;
+  grid-template-columns: 1fr 132px;
+  gap: 10px;
+  align-items: center;
+}
 
 .stats { margin-top: 12px; display: grid; gap: 6px; }
 .stat { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; font-size: 14px; }
