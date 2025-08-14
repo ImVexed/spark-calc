@@ -856,7 +856,7 @@ class Simulation {
       document.getElementById(id).addEventListener('input', () => {
         this.config = this.readConfigFromDOM();
         this.arena = this.createArena(this.config.arenaType);
-        document.getElementById('coneOptions').style.display = this.config.castShape === 'cone' ? 'block' : 'none';
+        document.getElementById('coneOptions').style.display = this.config.castShape === 'circular' ? 'none' : 'block';
         // live-apply enemy radius
         this.boss.r = clamp(this.config.bossRadius, 0.1, 999) * this.scale;
 
@@ -883,7 +883,7 @@ class Simulation {
     document.getElementById('stopBtn').addEventListener('click', () => { this.running = false; });
     document.getElementById('resetBtn').addEventListener('click', () => { this.reset(); });
 
-    document.getElementById('coneOptions').style.display = this.config.castShape === 'cone' ? 'block' : 'none';
+    document.getElementById('coneOptions').style.display = this.config.castShape === 'circular' ? 'none' : 'block';
   }
 
   installInput() {
@@ -931,12 +931,18 @@ class Simulation {
     }
     const castId = nextCastId++;
     for (const angle of angles) {
+      let range = 1;
+      if (cfg.castShape === 'coneUnpredictable') {
+        range = randRange(0.1, 1.9); // random range for unpredictable cone
+      }
+
       this.projectiles.push(new Projectile({
         castId,
         x: this.caster.x,
         y: this.caster.y,
         angle,
-        speed: (BASE_PROJ_SPEED_UNITS * (this.config.projSpeedMod || 1)) * this.scale, // convert to pixels per second
+        // Calculate random speed mod based on config
+        speed: (BASE_PROJ_SPEED_UNITS * (this.config.projSpeedMod || 1)) * range * this.scale,
         now,
         duration: this.config.duration,
         casterRef: this.caster,
@@ -1101,7 +1107,7 @@ class Simulation {
     this.arena.draw(ctx);
 
     // If cone casting, draw facing and 90° cone lines from caster
-    if (this.config.castShape === 'cone') {
+    if (this.config.castShape != 'circular') {
       const facing = (this.config.casterFacingDeg || 0) * DEG_TO_RAD;
       const half = (90 * DEG_TO_RAD) / 2;
       const r = ARENA_RADIUS_UNITS * this.scale * 0.3; // visual length (cut by ~66%)
